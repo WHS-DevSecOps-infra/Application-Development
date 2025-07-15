@@ -1,0 +1,223 @@
+name: DEV CI
+
+# main 브랜치로 PR이 열릴 때 특정 디렉토리 내 파일 변경이 있는 경우에만 실행
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "operation-team-account/**"
+      - "identity-team-account/**"
+      - "prod-team-account/**"
+      - "dev-team-account/**"
+      - "security-team-account/**"
+      - "stage-team-account/**"
+      - "management-team-account/**"
+
+# 워크플로우 실행 시 필요한 권한 설정
+permissions:
+  contents: read # 저장소 콘텐츠 읽기
+  pull-requests: write # PR에 댓글 작성
+  id-token: write # AWS OIDC 인증에 필요
+
+jobs:
+  # 변경된 디렉토리를 탐지하고 matrix를 구성하는 Job
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }} # 다음 job에서 사용할 output matrix
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0 # 전체 git history 가져오기
+
+      - name: Fetch origin/main
+        run: git fetch origin main # main 브랜치 가져오기
+
+      - name: Detect Changed Directories & Build Matrix
+        id: set
+        run: |
+          FILES=$(git diff --name-only origin/main...${{ github.sha }})
+          echo "Changed files:"
+          echo "$FILES"
+          # 디렉토리명과 AWS Role Key 매핑
+          declare -A ROLE_MAP=(
+            ["operation-team-account"]="ROLE_ARN_OPERATION"
+            ["identity-team-account"]="ROLE_ARN_IDENTITY"
+            ["prod-team-account"]="ROLE_ARN_PROD"
+            ["dev-team-account"]="ROLE_ARN_DEV"
+            ["security-team-account"]="ROLE_ARN_SECURITY"
+            ["stage-team-account"]="ROLE_ARN_STAGE"
+            ["management-team-account"]="ROLE_ARN_MANAGEMENT"
+          )
+
+          TMP_FILE=$(mktemp)
+          # 변경된 파일들을 돌면서 각 디렉토리의 .tf 파일이 있는 경우만 matrix 구성
+          for FILE in $FILES; do
+            DIR=$(dirname "$FILE")
+            TOP_DIR=$(echo $DIR | cut -d/ -f1)
+            ROLE_KEY="${ROLE_MAP[$TOP_DIR]}"
+
+            if [ -n "$ROLE_KEY" ]; then
+              if [ "$DIR" == "$TOP_DIR" ]; then
+                TF_COUNT=$(find "$DIR" -maxdepth 1 -name '*.tf' | wc -l)
+                if [ "$TF_COUNT" -gt 0 ]; then
+                  echo "$DIR|$ROLE_KEY" >> $TMP_FILE
+                fi
+              else
+                TF_COUNT=$(find "$DIR" -maxdepth 1 -name '*.tf' | wc -l)
+                if [ "$TF_COUNT" -gt 0 ]; then
+                  echo "$DIR|$ROLE_KEY" >> $TMP_FILE
+                fi
+              fi
+            fi
+          done
+
+          # 중복 제거 및 JSON 형태의 matrix 생성
+          UNIQUE_LINES=$(sort $TMP_FILE | uniq)
+          MATRIX_JSON="["
+          FIRST=1
+
+          while IFS= read -r LINE; do
+            DIR=$(echo $LINE | cut -d"|" -f1)
+            ROLE_KEY=$(echo $LINE | cut -d"|" -f2)
+
+            if [ $FIRST -eq 1 ]; then
+              FIRST=0
+            else
+              MATRIX_JSON="$MATRIX_JSON,"
+            fi
+
+            MATRIX_JSON="$MATRIX_JSON{\"dir\":\"$DIR\",\"role_key\":\"$ROLE_KEY\"}"
+          done <<< "$UNIQUE_LINES"
+
+          MATRIX_JSON="$MATRIX_JSON]"
+
+          echo "Final JSON matrix:"
+          echo "$MATRIX_JSON"
+
+          echo "matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+
+  # 실제 Terraform 관련 CI 작업을 수행하는 Job
+  terraform-ci:
+    needs: detect-changes
+    if: ${{ needs.detect-changes.outputs.matrix != '[]' }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+      fail-fast: false
+
+    env:
+      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      INFRACOST_TERRAFORM_CLI_WRAPPER: false
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ap-northeast-2
+          role-to-assume: ${{ secrets[matrix.role_key] }}
+
+      - name: Install Terraform
+        run: |
+          curl -LO https://releases.hashicorp.com/terraform/1.4.0/terraform_1.4.0_linux_amd64.zip
+          unzip terraform_1.4.0_linux_amd64.zip
+          sudo mv terraform /usr/local/bin/
+
+      - name: Install tfsec # 보안 분석 도구 설치
+        run: |
+          curl -sSL https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+
+      - name: Run tfsec (fail on HIGH+)
+        run: tfsec --minimum-severity HIGH --no-color ${{ matrix.dir }}
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ${{ matrix.dir }}
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        working-directory: ${{ matrix.dir }}
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: ${{ matrix.dir }}
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          START_TIME=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          echo "START_TIME=$START_TIME" >> $GITHUB_ENV
+
+          PLAN_FILE=tfplan.binary
+          PLAN_TXT=plan.txt
+          PLAN_JSON=plan.json
+
+          # Plan 파일 생성 및 출력 저장
+          terraform plan -no-color -out=$PLAN_FILE > /dev/null 2> plan_error.txt || echo "PLAN_FAILED=true" >> $GITHUB_ENV
+          terraform show -no-color $PLAN_FILE > $PLAN_TXT 2>/dev/null || echo "Plan failed" > $PLAN_TXT
+
+          # ANSI 색상 코드 제거
+          cat $PLAN_TXT | \
+            sed 's/`/\\`/g' | \
+            tr -d '\r' | \
+            sed -r "s/\x1B\[[0-9;]*[JKmsu]//g" \
+            > cleaned_plan.txt
+
+          PLAN_CONTENT=$(cat cleaned_plan.txt)
+
+          # infracost 분석에 사용하기 위한 PLAN_JSON 저
+          terraform show -json $PLAN_FILE > $PLAN_JSON || true
+
+          # PR comment
+          {
+            echo "PLAN_CONTENT<<EOF"
+            echo "$PLAN_CONTENT"
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+        working-directory: ${{ matrix.dir }}
+
+      - name: Comment Terraform Plan on PR
+        if: github.event.pull_request.number != ''
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ## [Terraform Plan Summary]
+            | 항목            | 값 |
+            |-----------------|-----|
+            | **Status**      | `${{ steps.plan.outcome }}` |
+            | **Directory**   | `${{ matrix.dir }}`  |
+            | **Executed At** | `${{ env.START_TIME }}` |
+
+            ---
+
+            ### Plan Output
+            ```hcl
+            ${{ steps.plan.outputs.PLAN_CONTENT }}
+            ```
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v2
+
+      - name: Infracost Breakdown
+        run: |
+          infracost breakdown \
+            --path=plan.json \
+            --format=json \
+            --out-file=infracost.json
+        working-directory: ${{ matrix.dir }}
+
+      - name: Infracost Comment on Pull Request
+        uses: infracost/actions/comment@v1
+        with:
+          path: ${{ matrix.dir }}/infracost.json
+          behavior: update
