@@ -1,0 +1,27 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform.lock.hcl
+*.lock.hcl
+
+# 대용량 파일들
+*.zip
+*.tar.gz
+*.exe
+*.dmg
+*.pkg
+*.bin
+
+# 로그 파일들
+*.log
+crash.log
+
+# OS 파일들
+.DS_Store
+Thumbs.db
+
+# IDE 파일들
+.vscode/
+.idea/
