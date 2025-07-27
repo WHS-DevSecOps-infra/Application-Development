@@ -7,7 +7,7 @@ data "terraform_remote_state" "vpc" {
   backend = "s3" 
     config = {
       bucket         = "application-team-tfstate-bucket"
-      key            = "vpc/terraform.tfstate"
+      key            = "develop/vpc.tfstate"
       region         = var.aws_region
       dynamodb_table = "terraform-locks"
       encrypt        = true
@@ -19,7 +19,7 @@ data "terraform_remote_state" "iam" {
   backend = "s3" 
     config = {
       bucket         = "application-team-tfstate-bucket"
-      key            = "infra/iam/terraform.tfstate"
+      key            = "develop/iam.tfstate"
       region         = var.aws_region
       dynamodb_table = "terraform-locks"
       encrypt        = true

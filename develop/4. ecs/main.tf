@@ -6,7 +6,7 @@ data "terraform_remote_state" "vpc" {
   backend = "s3"
   config = {
     bucket = "application-team-tfstate-bucket"
-    key    = "vpc/terraform.tfstate"
+    key    = "develop/vpc.tfstate"
     region = "ap-northeast-2"
   }
 }
@@ -15,7 +15,7 @@ data "terraform_remote_state" "alb" {
   backend = "s3"
   config = {
     bucket = "application-team-tfstate-bucket"
-    key    = "ecs/terraform.tfstate"
+    key    = "develop/alb.tfstate"
     region = "ap-northeast-2"
   }
 }
@@ -24,7 +24,7 @@ data "terraform_remote_state" "iam" {
   backend = "s3"
   config = {
     bucket = "application-team-tfstate-bucket"
-    key    = "infra/iam/terraform.tfstate"
+    key    = "develop/iam.tfstate"
     region = "ap-northeast-2"
   }
 }
@@ -33,7 +33,7 @@ data "terraform_remote_state" "ecr" {
   backend = "s3"
   config = {
     bucket = "application-team-tfstate-bucket"
-    key    = "ecr/terraform.tfstate"
+    key    = "develop/ecr.tfstate"
     region = "ap-northeast-2"
   }
 }
